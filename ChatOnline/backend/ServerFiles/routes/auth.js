@@ -31,7 +31,7 @@ router.post('/signup', async function (req, res) {
     // check if user already exists
     const existingUser = await User.findOne({ email: email })
     if (existingUser) {
-      return res.status(400).json({ message: 'User already exists' })
+      return res.status(400).json({ message: 'User already  exists' })
     }
 
     // encrypt password
