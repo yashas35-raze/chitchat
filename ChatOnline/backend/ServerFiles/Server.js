@@ -1,4 +1,6 @@
 const dotenv = require('dotenv')
+dotenv.config()
+
 const express = require('express')
 const mongoose = require('mongoose')
 const cors = require('cors')
@@ -6,8 +8,8 @@ const cors = require('cors')
 const authRoutes = require('./routes/auth')
 
 
-
-dotenv.config()
+console.log('EMAIL:', process.env.EMAIL)
+console.log('PASSWORD:', process.env.EMAIL_PASSWORD)
 
 const app = express()
 

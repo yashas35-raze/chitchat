@@ -64,15 +64,15 @@ export default function Signup() {
 
 async function handleSignup() {
   try {
-    const res = await axios.post('http://localhost:5000/api/auth/signup', {
+    await axios.post('http://localhost:5000/api/auth/signup', {
       fullName: fullName,
       email: email,
       password: password
     })
-    // save email for verify page
-    localStorage.setItem('verifyEmail', email)
-    // go to verify email page instead of home
-    navigate('/verify-email')
+    // save email for OTP page
+    localStorage.setItem('signupEmail', email)
+    // go to OTP verification page
+    navigate('/verify-signup-otp')
   } catch (err) {
     setError(err.response?.data?.message || 'Something went wrong!')
   }

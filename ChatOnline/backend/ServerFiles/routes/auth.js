@@ -11,8 +11,8 @@ const User = require('../models/User')
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: "yashasuputhran35@gmail.com",
-    pass: "edeyewequbxwyggy",
+    user: process.env.EMAIL,
+    pass: process.env.EMAIL_PASSWORD,
   },
 })
 
@@ -20,85 +20,207 @@ const transporter = nodemailer.createTransport({
 const otpStore = {}
 
 // ─────────────────────────────────────────
-// SIGNUP + SEND VERIFICATION EMAIL
+// SIGNUP - saves user + sends OTP
 // ─────────────────────────────────────────
 router.post('/signup', async function (req, res) {
   try {
     const { fullName, email, password } = req.body
 
-    const existingUser = await User.findOne({ email })
-    if (existingUser) {
-      return res.status(400).json({ message: 'User already exists' })
+    // check if user already exists and verified
+    const existingUser = await User.findOne({ email: email })
+    if (existingUser && existingUser.isVerified) {
+      return res.status(400).json({ message: 'User already exists!' })
     }
 
+    // if user exists but not verified, delete and recreate
+    if (existingUser && !existingUser.isVerified) {
+      await User.deleteOne({ email: email })
+    }
+
+    // encrypt password
     const hashedPassword = await bcrypt.hash(password, 10)
 
+    // save new user (not verified yet)
     const newUser = new User({
-      fullName,
-      email,
+      fullName: fullName,
+      email: email,
       password: hashedPassword,
+      isVerified: false,
     })
-
     await newUser.save()
 
-    // ✅ CORRECT PLACE
-    const info = await transporter.sendMail({
-      from: "yashasuputhran35@gmail.com",
-      to: "yashasuputhran35@gmail.com",
-      subject: "Test Email",
-      text: "Testing email"
+    // generate 6 digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString()
+
+    // save OTP with expiry (10 minutes)
+    otpStore[email] = {
+      otp: otp,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    }
+
+    // send OTP email
+    await transporter.sendMail({
+      from: process.env.EMAIL,
+      to: email,
+      subject: 'Your CONNECTO Signup OTP',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: auto; padding: 32px; background: #f0f7ff; border-radius: 16px;">
+          <h2 style="color: #2d7bbf; text-align: center;">CONNECTO</h2>
+          <h3 style="color: #1a3a5c; text-align: center;">Verify Your Account</h3>
+          <p style="color: #6b8caa; text-align: center;">
+            Hi ${fullName}! Welcome to CONNECTO.<br/>
+            Use the OTP below to verify your account.
+          </p>
+          <div style="text-align: center; margin: 24px 0;">
+            <span style="font-size: 36px; font-weight: 800; letter-spacing: 10px; color: #3a8fd8; background: white; padding: 16px 28px; border-radius: 12px; display: inline-block;">
+              ${otp}
+            </span>
+          </div>
+          <p style="color: #6b8caa; text-align: center; font-size: 13px;">
+            This OTP expires in <strong>10 minutes</strong>.
+          </p>
+          <p style="color: #aaa; text-align: center; font-size: 12px;">
+            If you did not create an account, please ignore this email.
+          </p>
+        </div>
+      `,
     })
 
-    console.log("✅ SUCCESS:", info.response)
-
-    res.status(201).json({ message: 'Signup successful' })
+    console.log('✅ Signup OTP sent to:', email)
+    res.status(201).json({ message: 'OTP sent to your email!' })
 
   } catch (err) {
-    console.log("❌ ERROR:", err)
+    console.log('❌ Signup error:', err)
     res.status(500).json({ message: err.message })
   }
 })
-// ─────────────────────────────────────────
-// VERIFY EMAIL
-// ─────────────────────────────────────────
-router.get('/verify/:token', async function (req, res) {
-  try {
-    const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET)
 
-    const user = await User.findById(decoded.userId)
-    if (!user) {
-      return res.status(400).send('Invalid user')
+// ─────────────────────────────────────────
+// VERIFY SIGNUP OTP - activates account
+// ─────────────────────────────────────────
+router.post('/verify-signup-otp', async function (req, res) {
+  try {
+    const { email, otp } = req.body
+
+    // check OTP exists
+    const stored = otpStore[email]
+    if (!stored) {
+      return res.status(400).json({ message: 'OTP not found! Please signup again.' })
     }
 
-    user.isVerified = true
-    await user.save()
+    // check OTP expired
+    if (Date.now() > stored.expiresAt) {
+      delete otpStore[email]
+      return res.status(400).json({ message: 'OTP expired! Please signup again.' })
+    }
 
-    res.send('✅ Email verified successfully! You can now login.')
+    // check OTP matches
+    if (stored.otp !== otp) {
+      return res.status(400).json({ message: 'Invalid OTP! Please try again.' })
+    }
+
+    // activate account
+    await User.findOneAndUpdate(
+      { email: email },
+      { isVerified: true }
+    )
+
+    // delete OTP from store
+    delete otpStore[email]
+
+    // create token
+    const user = await User.findOne({ email: email })
+    const token = jwt.sign(
+      { userId: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    )
+
+    console.log('✅ Account verified:', email)
+    res.status(200).json({
+      message: 'Account verified successfully!',
+      token: token,
+      user: { fullName: user.fullName, email: user.email }
+    })
+
   } catch (err) {
-    res.status(400).send('❌ Invalid or expired token')
+    res.status(500).json({ message: err.message })
   }
 })
 
+// ─────────────────────────────────────────
+// RESEND SIGNUP OTP
+// ─────────────────────────────────────────
+router.post('/resend-signup-otp', async function (req, res) {
+  try {
+    const { email } = req.body
+
+    const user = await User.findOne({ email: email })
+    if (!user) {
+      return res.status(400).json({ message: 'No account found! Please signup first.' })
+    }
+
+    if (user.isVerified) {
+      return res.status(400).json({ message: 'Account already verified!' })
+    }
+
+    // generate new OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString()
+
+    otpStore[email] = {
+      otp: otp,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    }
+
+    await transporter.sendMail({
+      from: process.env.EMAIL,
+      to: email,
+      subject: 'Your CONNECTO Signup OTP',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: auto; padding: 32px; background: #f0f7ff; border-radius: 16px;">
+          <h2 style="color: #2d7bbf; text-align: center;">CONNECTO</h2>
+          <h3 style="color: #1a3a5c; text-align: center;">Verify Your Account</h3>
+          <p style="color: #6b8caa; text-align: center;">
+            Hi ${user.fullName}! Here is your new OTP.
+          </p>
+          <div style="text-align: center; margin: 24px 0;">
+            <span style="font-size: 36px; font-weight: 800; letter-spacing: 10px; color: #3a8fd8; background: white; padding: 16px 28px; border-radius: 12px; display: inline-block;">
+              ${otp}
+            </span>
+          </div>
+          <p style="color: #6b8caa; text-align: center; font-size: 13px;">
+            This OTP expires in <strong>10 minutes</strong>.
+          </p>
+        </div>
+      `,
+    })
+
+    res.status(200).json({ message: 'OTP resent successfully!' })
+
+  } catch (err) {
+    res.status(500).json({ message: err.message })
+  }
+})
 
 // ─────────────────────────────────────────
-// LOGIN (only if verified)
+// LOGIN - checks if email is verified
 // ─────────────────────────────────────────
 router.post('/login', async function (req, res) {
   try {
     const { email, password } = req.body
 
-    const user = await User.findOne({ email })
+    const user = await User.findOne({ email: email })
     if (!user) {
-      return res.status(400).json({ message: 'User not found' })
+      return res.status(400).json({ message: 'User not found! Please sign up.' })
     }
 
     if (!user.isVerified) {
-      return res.status(400).json({ message: 'Please verify your email first' })
+      return res.status(400).json({ message: 'Please verify your email first!' })
     }
 
     const isMatch = await bcrypt.compare(password, user.password)
     if (!isMatch) {
-      return res.status(400).json({ message: 'Wrong password' })
+      return res.status(400).json({ message: 'Wrong password!' })
     }
 
     const token = jwt.sign(
@@ -107,91 +229,126 @@ router.post('/login', async function (req, res) {
       { expiresIn: '7d' }
     )
 
-    res.status(200).json({
-      token,
-      user: { fullName: user.fullName, email },
-    })
+    res.status(200).json({ token: token, user: { fullName: user.fullName, email } })
+
   } catch (err) {
     res.status(500).json({ message: err.message })
   }
 })
 
-
 // ─────────────────────────────────────────
-// FORGOT PASSWORD (OTP)
+// FORGOT PASSWORD - sends OTP to email
 // ─────────────────────────────────────────
-router.post('/forgetpassword', async function (req, res) {
+router.post('/forgot-password', async function (req, res) {
   try {
     const { email } = req.body
 
-    const user = await User.findOne({ email })
+    const user = await User.findOne({ email: email })
     if (!user) {
-      return res.status(400).json({ message: 'No account found' })
+      return res.status(400).json({ message: 'No account found with this email!' })
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString()
 
     otpStore[email] = {
-      otp,
+      otp: otp,
       expiresAt: Date.now() + 10 * 60 * 1000,
     }
 
     await transporter.sendMail({
       from: process.env.EMAIL,
       to: email,
-      subject: 'CONNECTO OTP',
-      html: `<h2>Your OTP: ${otp}</h2>`,
+      subject: 'Your CONNECTO Password Reset OTP',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: auto; padding: 32px; background: #f0f7ff; border-radius: 16px;">
+          <h2 style="color: #2d7bbf; text-align: center;">CONNECTO</h2>
+          <h3 style="color: #1a3a5c; text-align: center;">Password Reset OTP</h3>
+          <p style="color: #6b8caa; text-align: center;">Use the OTP below to reset your password.</p>
+          <div style="text-align: center; margin: 24px 0;">
+            <span style="font-size: 36px; font-weight: 800; letter-spacing: 10px; color: #3a8fd8; background: white; padding: 16px 28px; border-radius: 12px; display: inline-block;">
+              ${otp}
+            </span>
+          </div>
+          <p style="color: #6b8caa; text-align: center; font-size: 13px;">
+            This OTP expires in <strong>10 minutes</strong>.
+          </p>
+          <p style="color: #aaa; text-align: center; font-size: 12px;">
+            If you did not request this, please ignore this email.
+          </p>
+        </div>
+      `,
     })
 
-    res.status(200).json({ message: 'OTP sent' })
+    res.status(200).json({ message: 'OTP sent to your email!' })
+
   } catch (err) {
     res.status(500).json({ message: err.message })
   }
 })
 
-
 // ─────────────────────────────────────────
-// VERIFY OTP
+// VERIFY OTP (forgot password)
 // ─────────────────────────────────────────
-router.post('/verifyotp', async function (req, res) {
-  const { email, otp } = req.body
+router.post('/verify-otp', async function (req, res) {
+  try {
+    const { email, otp } = req.body
 
-  const stored = otpStore[email]
-  if (!stored) {
-    return res.status(400).json({ message: 'OTP not found' })
+    const stored = otpStore[email]
+    if (!stored) {
+      return res.status(400).json({ message: 'OTP not found! Please request a new one.' })
+    }
+
+    if (Date.now() > stored.expiresAt) {
+      delete otpStore[email]
+      return res.status(400).json({ message: 'OTP expired! Please request a new one.' })
+    }
+
+    if (stored.otp !== otp) {
+      return res.status(400).json({ message: 'Invalid OTP! Please try again.' })
+    }
+
+    res.status(200).json({ message: 'OTP verified successfully!' })
+
+  } catch (err) {
+    res.status(500).json({ message: err.message })
   }
-
-  if (Date.now() > stored.expiresAt) {
-    delete otpStore[email]
-    return res.status(400).json({ message: 'OTP expired' })
-  }
-
-  if (stored.otp !== otp) {
-    return res.status(400).json({ message: 'Invalid OTP' })
-  }
-
-  res.status(200).json({ message: 'OTP verified' })
 })
-
 
 // ─────────────────────────────────────────
 // RESET PASSWORD
 // ─────────────────────────────────────────
-router.post('/resetpassword', async function (req, res) {
-  const { email, otp, newPassword } = req.body
+router.post('/reset-password', async function (req, res) {
+  try {
+    const { email, otp, newPassword } = req.body
 
-  const stored = otpStore[email]
-  if (!stored || stored.otp !== otp) {
-    return res.status(400).json({ message: 'Invalid OTP' })
+    const stored = otpStore[email]
+    if (!stored) {
+      return res.status(400).json({ message: 'OTP not found! Please request a new one.' })
+    }
+
+    if (Date.now() > stored.expiresAt) {
+      delete otpStore[email]
+      return res.status(400).json({ message: 'OTP expired! Please request a new one.' })
+    }
+
+    if (stored.otp !== otp) {
+      return res.status(400).json({ message: 'Invalid OTP!' })
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10)
+
+    await User.findOneAndUpdate(
+      { email: email },
+      { password: hashedPassword }
+    )
+
+    delete otpStore[email]
+
+    res.status(200).json({ message: 'Password reset successfully!' })
+
+  } catch (err) {
+    res.status(500).json({ message: err.message })
   }
-
-  const hashedPassword = await bcrypt.hash(newPassword, 10)
-
-  await User.findOneAndUpdate({ email }, { password: hashedPassword })
-
-  delete otpStore[email]
-
-  res.status(200).json({ message: 'Password reset successful' })
 })
 
 module.exports = router

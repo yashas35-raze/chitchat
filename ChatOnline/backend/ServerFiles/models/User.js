@@ -16,10 +16,10 @@ const userSchema = new mongoose.Schema({
   },
   isVerified: {
     type: Boolean,
-    default: false    // ← false until email is verified
+    default: false
   },
   verificationToken: {
-    type: String,     // ← stores the token we send in email
+    type: String,
     default: null
   }
 }, { timestamps: true })
